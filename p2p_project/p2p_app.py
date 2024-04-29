@@ -1,14 +1,56 @@
 #!/usr/bin/python3
-# Python program to implement a strict decentralized P2P 
+'''Python program to implement a strict decentralized P2P'''
 import socket
 import sys
 import socketserver
 import threading
 import selectors
 import types
+import sqlite3
+
+HANDSHAKE_PEER_COMMAND = b'__hello__'
 
 REQUEST_PEER_LIST_COMMAND = b'qwerty'
 RECEIVE_PEER_LIST_COMMAND = b'qwerty'
+
+SQL_DATABASE = "p2p_app.db"
+
+
+# Acknoledging this is a bad way to handle the database, globals are not good.
+# TODO: Refactor to reduce dependency on globals.
+global_con = sqlite3.connect(SQL_DATABASE)
+global_cur = global_con.cursor()
+
+try:
+    global_res = global_cur.execute("SELECT name FROM sqlite_master WHERE name='userlist'")
+    table_exists = global_res.fetchone() is not None
+except:
+    table_exists = False
+
+if (not table_exists):
+    global_cur.execute("CREATE TABLE userlist(userid,ipaddr,serverport,clientport,username,email)")
+
+def addUserToDatabase(IPAddr,Port,*,userid="?",username="?",clientport="",email=""):
+    con = sqlite3.connect(SQL_DATABASE)
+    cur = con.cursor()
+    newuser = {
+        "id":userid,
+        "newip":IPAddr,
+        "newserver":Port,
+        "newuser":username,
+        "newclient":clientport,
+        "newemail":email
+    }
+    res = cur.execute("SELECT * FROM userlist WHERE ipaddr=:newip AND serverport=:newserver",(newuser))
+    if res.fetchone() is None:
+        cur.execute("INSERT INTO userlist VALUES" +
+                    "(:id, :newip, :newserver, :newclient, :newuser, :newemail)",(newuser))
+    else:
+        cur.execute("UPDATE userlist SET VALUES" +
+                    "(:id, :newip, :newserver, :newclient, :newuser, :newemail) " + 
+                    "WHERE ipaddr=:newip AND serverport=:newserver",(newuser))
+    con.commit()
+    return
 
 class NewPeerHandler(socketserver.StreamRequestHandler):
     """
@@ -17,12 +59,21 @@ class NewPeerHandler(socketserver.StreamRequestHandler):
 
     def handle(self):
         message = self.rfile.readline().strip()
-        if (message == REQUEST_PEER_LIST_COMMAND):
+        print("{} wrote:".format(self.client_address[0]))
+        print(message.decode('utf-8'))
+
+        command = message.split(b' ')[0] 
+        messagestr = message.decode('utf-8').split(' ')
+        if (command== REQUEST_PEER_LIST_COMMAND):
             self.wfile.writelines([bytes("Sent Peer List\n",'utf-8')])
             # TODO: add handling so we can exchange peer lists.
-        else:
-            print("{} wrote:".format(self.client_address[0]))
-            print(message.decode('utf-8'))
+            return
+        if (command == HANDSHAKE_PEER_COMMAND):
+            # TODO: add some identification or authentication before we add users to 
+            # our database.
+            addUserToDatabase(self.client_address[0],self.client_address[1],userid=messagestr[2],username=messagestr[3],clientport=messagestr[1],email=messagestr[4])
+            return
+
 
 
 class ThreadedP2PServer(socketserver.ThreadingMixIn,socketserver.TCPServer):
@@ -46,6 +97,8 @@ class MainClient:
         self.sel = selectors.DefaultSelector()
         self.service_thread = threading.Thread(target=self.check_reads)
         self.service_thread.daemon = True
+        self.con = sqlite3.connect(SQL_DATABASE)
+        self.cur = self.con.cursor()
         
     def service_connection(self,key,mask):
         sock = key.fileobj
@@ -92,6 +145,8 @@ class MainClient:
             events = termsel.select(timeout=1)
             if events:
                 message = input('(someone)>')
+                if (message == "exit"):
+                    return
                 sock.sendall(bytes(message,'utf-8'))
 
 
@@ -104,6 +159,10 @@ class MainClient:
                 command = inp.split(" ")
                 sock = self.open_chat(command[1],int(command[2]))
                 self.chat_pm(sock)
+            elif (inp.split(" ")[0] == "listusers"):
+                res = self.cur.execute("SELECT * FROM userlist")
+                print(res.fetchall())
+
             
 
 
@@ -122,7 +181,8 @@ if __name__ == "__main__":
         server_thread.daemon = True
         server_thread.start()
 
-        #client(ip, port, REQUEST_PEER_LIST_COMMAND.decode('utf-8') + "\n")
+        # Test by sending a connection creating new user entry from a bad actor
+        client(ip, port, HANDSHAKE_PEER_COMMAND.decode('utf-8') + " -1 \\n 'bad_will :blackhat@agency.com\n")
         #client(ip, port, "Hello World 2\n")
         #client(ip, port, "Hello World 3\n")
         terminal = MainClient()
